@@ -216,11 +216,68 @@ struct CryptCtx
 		decltype(key2) key2PlusOffset;
 		Key2AddOffset(key2PlusOffset, dataOffsetFromStart);
 
-		u32 block[4];
-		memmove(block, key2PlusOffset, sizeof(block));
-		STATIC_ASSERT(sizeof(block) == sizeof(key2PlusOffset));
+		u32* data4 = (u32*)data;
+		i32 processedSize = dataSize;
+		if(dataSize >= 16) {
+			const int count16 = dataSize/16;
 
-		ComputeXorBlock(block);
+			for(int i = 0; i < count16; i++) {
+				u32 block[4];
+				memmove(block, key2PlusOffset, sizeof(block));
+				STATIC_ASSERT(sizeof(block) == sizeof(key2PlusOffset));
+				ComputeXorBlock(block);
+
+				data4[0] ^= block[0];
+				data4[1] ^= block[1];
+				data4[2] ^= block[2];
+				data4[3] ^= block[3];
+				data4 += 4;
+
+				// weird key alteration
+				u8* keyPtr = key2PlusOffset + 15;
+				*keyPtr += 1;
+				u8 v = *keyPtr;
+				i32 j = 0;
+				while(v == 0) {
+					j++;
+					keyPtr--;
+					if(j == 8) {
+						key2PlusOffset[8] = 0;
+						key2PlusOffset[12] = 0;
+					}
+					*keyPtr += 1;
+					v = *keyPtr;
+				}
+			}
+
+			processedSize -= count16 * 16;
+		}
+
+		if(processedSize > 0) {
+			u32 block[4];
+			memmove(block, key2PlusOffset, sizeof(block));
+			STATIC_ASSERT(sizeof(block) == sizeof(key2PlusOffset));
+			ComputeXorBlock(block);
+
+			u32* pBlock = block;
+			if(processedSize >= 4) {
+				const int count4 = processedSize/4;
+
+				for(int i = 0; i < count4; i++) {
+					data4[0] ^= pBlock[0];
+					data4++;
+					pBlock++;
+				}
+
+				processedSize -= count4 * 4;
+			}
+			if(processedSize > 0) {
+				u32 hold = 0;
+				memmove(&hold, data4, processedSize);
+				hold ^= pBlock[0];
+				memmove(data4, &data4, processedSize);
+			}
+		}
 	}
 };
 
