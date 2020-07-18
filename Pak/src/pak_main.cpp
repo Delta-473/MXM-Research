@@ -1,5 +1,8 @@
 #include <base.h>
 
+#error TODO:
+// - break on 0x1165c2, find out how the data is decompressed (decryption seems fine)
+
 const u8 g_AES_256_0[256] = {
 	0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
 	0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
@@ -211,13 +214,73 @@ struct CryptCtx
 				 (u32)*(u8 *)(g_AES_1024_1_2 + (step1_3 & 0xff)) ^ exp1[rounds * 4 + 3];
 	}
 
+	void KeyAlteration(u8* key)
+	{
+		u8* p = key + 0xf;
+		*p += 1;
+		i32 i = 0;
+		if(*p == 0) {
+			while(true) {
+				i = i + 1;
+				p = p + -1;
+				if(i == 8) break;
+				*p = *p + 1;
+				if(*p != 0) {
+					return;
+				}
+			}
+
+			*(u32 *)(key + 8) = 0;
+			*(u32 *)(key + 0xc) = 0;
+		}
+	}
+
 	void Decrypt(void* data, const int dataSize, const int dataOffsetFromStart)
 	{
 		decltype(key2) key2PlusOffset;
-		Key2AddOffset(key2PlusOffset, dataOffsetFromStart);
+		Key2AddOffset(key2PlusOffset, dataOffsetFromStart >> 4);
 
 		u32* data4 = (u32*)data;
 		i32 processedSize = dataSize;
+
+		if(dataOffsetFromStart > 0) {
+			u32 offsetAndF = dataOffsetFromStart & 0xf;
+			i32 sizePlusOffsetAndF = (offsetAndF - 1) + processedSize;
+			if(sizePlusOffsetAndF > 0xf) {
+				sizePlusOffsetAndF = 0xf;
+			}
+
+			u32 block[4];
+			memmove(block, key2PlusOffset, sizeof(block));
+			STATIC_ASSERT(sizeof(block) == sizeof(key2PlusOffset));
+			ComputeXorBlock(block);
+
+			i32 var1 = (sizePlusOffsetAndF - offsetAndF) + 1;
+			if(offsetAndF != 0 && offsetAndF <= sizePlusOffsetAndF) {
+				i32 it = offsetAndF;
+
+				if(var1 > 0x1f) {
+					u8* pCur = (u8*)data;
+					ASSERT_MSG(0, "implement me");
+				}
+				if(it <= sizePlusOffsetAndF) {
+					u8* pCur = (u8*)data + (it - offsetAndF);
+					do {
+						*pCur ^= *(((u8*)block) + it);
+						it++;
+						pCur++;
+					} while (it <= sizePlusOffsetAndF);
+				}
+
+				processedSize -= var1;
+				data4 = (u32*)((u8*)data + var1);
+			}
+
+			if(offsetAndF != 0) {
+				KeyAlteration(key2PlusOffset);
+			}
+		}
+
 		if(dataSize >= 16) {
 			const int count16 = dataSize/16;
 
@@ -233,21 +296,7 @@ struct CryptCtx
 				data4[3] ^= block[3];
 				data4 += 4;
 
-				// weird key alteration
-				u8* keyPtr = key2PlusOffset + 15;
-				*keyPtr += 1;
-				u8 v = *keyPtr;
-				i32 j = 0;
-				while(v == 0) {
-					j++;
-					keyPtr--;
-					if(j == 8) {
-						key2PlusOffset[8] = 0;
-						key2PlusOffset[12] = 0;
-					}
-					*keyPtr += 1;
-					v = *keyPtr;
-				}
+				KeyAlteration(key2PlusOffset);
 			}
 
 			processedSize -= count16 * 16;
@@ -275,7 +324,7 @@ struct CryptCtx
 				u32 hold = 0;
 				memmove(&hold, data4, processedSize);
 				hold ^= pBlock[0];
-				memmove(data4, &data4, processedSize);
+				memmove(data4, &hold, processedSize);
 			}
 		}
 	}
@@ -287,7 +336,8 @@ struct PakHeader
 	u16 minorVersion;
 	u16 majorVersion;
 
-	u8 _unk[8];
+	i32 _unk1;
+	i32 _unk2;
 
 	i32 subHeaderSize;
 	i32 destSizeRelated1;
@@ -295,10 +345,24 @@ struct PakHeader
 	u16 encryptionRelated1;
 	u16 encryptionRelated2;
 
-	i32 _unk2;
+	i32 _unk3;
 };
 
 STATIC_ASSERT(sizeof(PakHeader) == 36);
+
+PUSH_PACKED
+struct SubHeader
+{
+	i32 i1;
+	i32 dataOffset;
+	u8 unk[16];
+	u16 u1;
+	u16 u2;
+	wchar_t name[1];
+};
+POP_PACKED
+
+STATIC_ASSERT(sizeof(SubHeader)-2 == 28);
 
 void PrintUsage()
 {
@@ -344,7 +408,39 @@ int main(int argc, char** argv)
 		};
 
 		ctx.Init(key1, key2);
-		ctx.Decrypt(header._unk, 28, 0);
+		ctx.Decrypt(&header._unk1, 28, 0);
+
+		LOG("header = {");
+		LOG("	subHeaderSize=%d", header.subHeaderSize);
+		LOG("	destSizeRelated1=%d", header.destSizeRelated1);
+		LOG("	destSizeRelated2=%d", header.destSizeRelated2);
+		LOG("	encryptionRelated1=%d", header.encryptionRelated1);
+		LOG("	encryptionRelated2=%d", header.encryptionRelated2);
+		LOG("}");
+
+		u8* subHeaderData = fileBuff.ReadRaw(header.subHeaderSize);
+		ctx.Decrypt(subHeaderData, header.subHeaderSize, 28);
+
+		const SubHeader& subHeader = *(SubHeader*)subHeaderData;
+		LOG("subHeader = {");
+		LOG("	i1=%d", subHeader.i1);
+		LOG("	dataOffset=%d", subHeader.dataOffset);
+		LOG_NNL("	unk=[ ");
+		for(int i = 0; i < 16; i++) {
+			LOG_NNL("%x,", subHeader.unk[i]);
+		}
+		LOG("]");
+		LOG("	u1=%d", subHeader.u1);
+		LOG("	u2=%d", subHeader.u2);
+		LOG("	name=%ws", subHeader.name);
+		LOG("}");
+
+		fileBuff = ConstBuffer(fileData, fileSize);
+		fileBuff.ReadRaw(subHeader.dataOffset);
+
+		const i32 dataSize = fileSize - subHeader.dataOffset;
+		u8* data = fileBuff.ReadRaw(dataSize);
+		ctx.Decrypt(data, dataSize, 0);
 
 		LOG("Done.");
 		return 0;
