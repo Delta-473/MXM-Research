@@ -91,6 +91,16 @@ project "pak"
 
 	includedirs {
 		"src",
+		brotli_include
+	}
+
+	libdirs {
+		brotli_libdir_x64
+	}
+
+	links {
+		"brotlidec",
+		"shlwapi"
 	}
 	
 	files {

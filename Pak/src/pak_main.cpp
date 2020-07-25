@@ -1,7 +1,7 @@
 #include <base.h>
-
-#error TODO:
-// - break on 0x1165c2, find out how the data is decompressed (decryption seems fine)
+#include <direct.h>
+#include <shlwapi.h>
+#include <brotli/decode.h>
 
 const u8 g_AES_256_0[256] = {
 	0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
@@ -355,7 +355,9 @@ struct SubHeader
 {
 	i32 i1;
 	i32 dataOffset;
-	u8 unk[16];
+	u32 extractedSize;
+	u8 unk[8];
+	i32 compressedSize;
 	u16 u1;
 	u16 u2;
 	wchar_t name[1];
@@ -366,7 +368,39 @@ STATIC_ASSERT(sizeof(SubHeader)-2 == 28);
 
 void PrintUsage()
 {
-	LOG("Usage: pak \"inputfile\"");
+	LOG("Usage: pak \"inputfile\" \"outputDir\"");
+}
+
+void PathGetFilename(const char* from, char* out)
+{
+	strcpy(out, from);
+	PathStripPathA(out);
+}
+
+void PathGetDirectory(const char* from, char* out)
+{
+	strcpy(out, from);
+	PathRemoveFileSpecA(out);
+}
+
+bool FileSaveBuff(const wchar_t* path, const void* data, const i32 dataSize)
+{
+	HANDLE hFile = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+	if(hFile == INVALID_HANDLE_VALUE) {
+		LOG("ERROR(CreateFileW): %d", GetLastError());
+		return false;
+	}
+
+	DWORD dwBytesToWrite = dataSize;
+	BOOL bErrorFlag = WriteFile(hFile, data, dwBytesToWrite, &dwBytesToWrite, NULL);
+
+	if(bErrorFlag == FALSE) {
+		LOG("ERROR(WriteFile): %d", GetLastError());
+		return false;
+	}
+
+	CloseHandle(hFile);
+	return true;
 }
 
 int main(int argc, char** argv)
@@ -374,8 +408,9 @@ int main(int argc, char** argv)
 	LogInit("pak.log");
 	LOG(".: Pak Unpacker :.");
 
-	if(argc == 2) {
+	if(argc == 3) {
 		const char* inputPath = argv[1];
+		const char* outputDir = argv[2];
 
 		// open and read input file
 		i32 fileSize;
@@ -423,24 +458,53 @@ int main(int argc, char** argv)
 
 		const SubHeader& subHeader = *(SubHeader*)subHeaderData;
 		LOG("subHeader = {");
-		LOG("	i1=%d", subHeader.i1);
+		LOG("	i1=%#x", subHeader.i1);
 		LOG("	dataOffset=%d", subHeader.dataOffset);
+		LOG("	extractedSize=%d", subHeader.extractedSize);
 		LOG_NNL("	unk=[ ");
-		for(int i = 0; i < 16; i++) {
+		for(int i = 0; i < ARRAY_COUNT(subHeader.unk); i++) {
 			LOG_NNL("%x,", subHeader.unk[i]);
 		}
 		LOG("]");
+		LOG("	compressedSize=%d", subHeader.compressedSize);
 		LOG("	u1=%d", subHeader.u1);
 		LOG("	u2=%d", subHeader.u2);
 		LOG("	name=%ws", subHeader.name);
 		LOG("}");
 
+		// reset file pointer
 		fileBuff = ConstBuffer(fileData, fileSize);
-		fileBuff.ReadRaw(subHeader.dataOffset);
+		fileBuff.ReadRaw(subHeader.dataOffset); // skip offset
 
-		const i32 dataSize = fileSize - subHeader.dataOffset;
-		u8* data = fileBuff.ReadRaw(dataSize);
-		ctx.Decrypt(data, dataSize, 0);
+		u8* src = fileBuff.ReadRaw(subHeader.compressedSize); // read crypted data
+		ctx.Decrypt(src, subHeader.compressedSize, 0);
+
+		ASSERT(subHeader.extractedSize < ((u32)2 * (1024*1024*1024))); // < 2GB
+		u8* dest = (u8*)malloc(subHeader.extractedSize);
+
+		BrotliDecoderState* dec = BrotliDecoderCreateInstance(0, 0, 0);
+
+		size_t decodedSize = subHeader.extractedSize;
+		BrotliDecoderResult bdr = BrotliDecoderDecompress(subHeader.compressedSize, src, &decodedSize, dest);
+
+		if(bdr == BrotliDecoderResult::BROTLI_DECODER_RESULT_SUCCESS) {
+			wchar_t path[256] = {0};
+			mbstowcs(path, outputDir, ARRAY_COUNT(path));
+
+			_mkdir(outputDir);
+			PathAppendW(path, subHeader.name);
+
+			LOG("Writing '%ls'", path);
+			bool r = FileSaveBuff(path, dest, decodedSize);
+			if(!r) {
+				LOG("ERROR(FileSaveBuff): failed to save file '%ls'", path);
+			}
+		}
+		else {
+			LOG("ERROR(BrotliDecoderDecompress): could not decode input");
+		}
+
+		BrotliDecoderDestroyInstance(dec);
 
 		LOG("Done.");
 		return 0;
