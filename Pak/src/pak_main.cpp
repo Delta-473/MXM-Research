@@ -185,7 +185,7 @@ void PathGetDirectory(const char* from, char* out)
 // Warning: replaces file if it exists
 bool FileSaveBuff(const wchar_t* path, const void* data, const i32 dataSize)
 {
-	HANDLE hFile = CreateFileW(path, GENERIC_WRITE, 0, NULL, TRUNCATE_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	HANDLE hFile = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 	if(hFile == INVALID_HANDLE_VALUE) {
 		LOG("ERROR(CreateFileW): %d", GetLastError());
 		return false;
