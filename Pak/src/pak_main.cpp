@@ -17,10 +17,10 @@ struct PakHeader
 	i32 _unk2;
 
 	i32 subHeaderSize;
-	i32 destSizeRelated1;
-	i32 destSizeRelated2;
-	u16 encryptionRelated1;
-	u16 encryptionRelated2;
+	i32 totalDirectoryCount;
+	i32 totalFileCount;
+	u16 rootDirectoryCount;
+	u16 rootFileCount;
 
 	i32 _unk3;
 };
@@ -42,6 +42,80 @@ struct SubHeader
 POP_PACKED
 
 STATIC_ASSERT(sizeof(SubHeader)-2 == 28);
+
+struct PakFile
+{
+	const PakHeader header;
+
+	struct Directory
+	{
+		i32 ID;
+		u16 dirCount;
+		u16 fileCount;
+		wchar_t* name;
+	};
+
+	Array<Directory,64> dirs;
+
+	explicit PakFile(const PakHeader& header_)
+		:header(header_)
+	{
+		dirs.Reserve(header.totalDirectoryCount);
+	}
+
+	void ReadDirectory(ConstBuffer& buff, const i32 dirCount, const i32 fileCount, const wchar_t* dirName)
+	{
+		LOG("%ls {", dirName);
+
+		buff.Read<u16>();
+
+		// root directory entries
+		for(int i = 0; i < dirCount; i++) {
+			u16 entrySize = buff.Read<u16>();
+			void* entryData = buff.ReadRaw(entrySize - 2);
+			ConstBuffer entry(entryData, entrySize);
+
+			u16 ID = entry.Read<u16>();
+			u16 dirCount = entry.Read<u16>();
+			u16 fileCount = entry.Read<u16>();
+			wchar_t* name = (wchar_t*)entry.ReadRaw(entrySize - 8);
+
+			LOG("[DIR] ID=%d dirCount=%d fileCount=%d name='%ls'", ID, dirCount, fileCount, name);
+
+			PakFile::Directory dir;
+			dir.ID = ID;
+			dir.dirCount = dirCount;
+			dir.fileCount = fileCount;
+			dir.name = name;
+			dirs.Push(dir);
+		}
+
+		// root file entries
+		for(int i = 0; i < fileCount; i++) {
+			u16 entrySize = buff.Read<u16>();
+			void* entryData = buff.ReadRaw(entrySize - 2);
+			ConstBuffer entry(entryData, entrySize);
+
+			i32 offset = entry.Read<i32>();
+			i32 decompressedSize = entry.Read<i32>();
+			u8* unk = entry.Read<u8[8]>();
+			i32 compressedSize = entry.Read<i32>();
+			u16 i1 = entry.Read<u16>();
+			u16 i2 = entry.Read<u16>();
+			wchar_t* name = (wchar_t*)entry.ReadRaw(entrySize - 26);
+
+			LOG("[FILE] offset=%d size(%d > %d) name='%ls'", offset, compressedSize, decompressedSize, name);
+		}
+
+		// directories content
+		for(int di = 0; di < dirCount; di++) {
+			const PakFile::Directory& dir = dirs[di];
+			ReadDirectory(buff, dir.dirCount, dir.fileCount, dir.name);
+		}
+
+		LOG("}");
+	}
+};
 
 void PrintUsage()
 {
@@ -111,10 +185,10 @@ bool UnpakSpecial_FileListXml(const char* outputDir, u8* fileData, i32 fileSize)
 
 	LOG("header = {");
 	LOG("	subHeaderSize=%d", header.subHeaderSize);
-	LOG("	destSizeRelated1=%d", header.destSizeRelated1);
-	LOG("	destSizeRelated2=%d", header.destSizeRelated2);
-	LOG("	encryptionRelated1=%d", header.encryptionRelated1);
-	LOG("	encryptionRelated2=%d", header.encryptionRelated2);
+	LOG("	destSizeRelated1=%d", header.totalDirectoryCount);
+	LOG("	destSizeRelated2=%d", header.totalFileCount);
+	LOG("	encryptionRelated1=%d", header.rootDirectoryCount);
+	LOG("	encryptionRelated2=%d", header.rootFileCount);
 	LOG("}");
 
 	u8* subHeaderData = fileBuff.ReadRaw(header.subHeaderSize);
@@ -190,12 +264,21 @@ bool UnpakFile(const char* outputDir, u8* fileData, i32 fileSize)
 
 	LOG("header = {");
 	LOG("	subHeaderSize=%d", header.subHeaderSize);
-	LOG("	destSizeRelated1=%d", header.destSizeRelated1);
-	LOG("	destSizeRelated2=%d", header.destSizeRelated2);
-	LOG("	encryptionRelated1=%d", header.encryptionRelated1);
-	LOG("	encryptionRelated2=%d", header.encryptionRelated2);
+	LOG("	totalDirectoryCount=%d", header.totalDirectoryCount);
+	LOG("	totalFileCount=%d", header.totalFileCount);
+	LOG("	rootDirectoryCount=%d", header.rootDirectoryCount);
+	LOG("	rootFileCount=%d", header.rootFileCount);
 	LOG("}");
 
+	u8* subHeaderData = fileBuff.ReadRaw(header.subHeaderSize);
+	ctx.Decrypt(subHeaderData, header.subHeaderSize, 28);
+
+	fileSaveBuff("header.raw", subHeaderData, header.subHeaderSize);
+
+	ConstBuffer buff(subHeaderData, header.subHeaderSize);
+
+	PakFile pak(header);
+	pak.ReadDirectory(buff, header.rootDirectoryCount, header.rootFileCount, L"root");
 	return true;
 }
 
