@@ -3,15 +3,20 @@ import shutil
 import glob
 import sys
 
+if len(sys.argv) < 3:
+    print('Usage: python extract_paks.py "Path\\To\\MXM" "Path\\To\\Extraction"')
+    print('Example: python extract_paks.py "C:\\MXM" "C:\\MXM_extracted"')
+    exit()
+
 script_dir = os.path.dirname(os.path.realpath(__file__))
 cur_dir = os.path.realpath(os.getcwd())
 input_dir = sys.argv[1]
 output_dir = sys.argv[2]
 
-print(script_dir, cur_dir, input_dir, output_dir)
+#print(script_dir, cur_dir, input_dir, output_dir)
 
 tool_path = os.path.realpath(os.path.join(script_dir, "pak.exe"))
-print(tool_path)
+#print(tool_path)
 
 pak_files = glob.glob(input_dir + '/**/*.pak', recursive=True)
 #print(pak_files)
