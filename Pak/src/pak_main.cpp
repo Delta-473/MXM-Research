@@ -7,6 +7,8 @@
 #include "crypto_xor.h"
 #include "keys.h"
 
+// TODO: cleanup
+
 struct PakHeader
 {
 	u32 magic;
@@ -47,30 +49,58 @@ struct PakFile
 {
 	const PakHeader header;
 
+	enum {
+		ROOT_ID = -1
+	};
+
 	struct Directory
 	{
 		i32 ID;
 		u16 dirCount;
 		u16 fileCount;
-		wchar_t* name;
+		const wchar_t* name;
+		wchar_t path[256];
+	};
+
+	struct File
+	{
+		i32 cryptType;
+		i32 offset;
+		i32 decompressedSize;
+		i32 compressedSize;
+		const wchar_t* name;
+		wchar_t path[256];
 	};
 
 	Array<Directory,64> dirs;
+	Array<File,256> files;
 
 	explicit PakFile(const PakHeader& header_)
 		:header(header_)
 	{
-		dirs.Reserve(header.totalDirectoryCount);
+		dirs.Reserve(header.totalDirectoryCount + 1); // + root
+		dirs.Reserve(header.totalFileCount);
 	}
 
-	void ReadDirectory(ConstBuffer& buff, const i32 dirCount, const i32 fileCount, const wchar_t* dirName)
+	void ReadTree(ConstBuffer& buff)
 	{
-		LOG("%ls {", dirName);
+		PakFile::Directory& dir = dirs.Push({});
+		dir.ID = ROOT_ID;
+		dir.dirCount = header.rootDirectoryCount;
+		dir.fileCount = header.rootFileCount;
+		dir.name = L"root";
+		memset(dir.path, 0, sizeof(dir.path)); // ""
+		ReadDirectory(buff, &dir);
+	}
+
+	void ReadDirectory(ConstBuffer& buff, const Directory* parent)
+	{
+		LOG("%ls {", parent->name);
 
 		buff.Read<u16>();
 
 		// root directory entries
-		for(int i = 0; i < dirCount; i++) {
+		for(int i = 0; i < parent->dirCount; i++) {
 			u16 entrySize = buff.Read<u16>();
 			void* entryData = buff.ReadRaw(entrySize - 2);
 			ConstBuffer entry(entryData, entrySize);
@@ -87,11 +117,13 @@ struct PakFile
 			dir.dirCount = dirCount;
 			dir.fileCount = fileCount;
 			dir.name = name;
+			memmove(dir.path, parent->path, sizeof(parent->path));
+			PathAppendW(dir.path, dir.name);
 			dirs.Push(dir);
 		}
 
 		// root file entries
-		for(int i = 0; i < fileCount; i++) {
+		for(int i = 0; i < parent->fileCount; i++) {
 			u16 entrySize = buff.Read<u16>();
 			void* entryData = buff.ReadRaw(entrySize - 2);
 			ConstBuffer entry(entryData, entrySize);
@@ -101,16 +133,32 @@ struct PakFile
 			u8* unk = entry.Read<u8[8]>();
 			i32 compressedSize = entry.Read<i32>();
 			u16 i1 = entry.Read<u16>();
-			u16 i2 = entry.Read<u16>();
-			wchar_t* name = (wchar_t*)entry.ReadRaw(entrySize - 26);
+			u16 cryptType = entry.Read<u16>();
+			const wchar_t* name = (wchar_t*)entry.ReadRaw(entrySize - 26);
 
-			LOG("[FILE] offset=%d size(%d > %d) name='%ls'", offset, compressedSize, decompressedSize, name);
+			LOG("[FILE] offset=%d size(%d > %d) name='%ls' cryptType=%d", offset, compressedSize, decompressedSize, name, cryptType);
+			/*LOG_NNL("	unk=[ ");
+			for(int i = 0; i < 8; i++) {
+				LOG_NNL("%x,", unk[i]);
+			}
+			LOG("]");
+			LOG("i1=%d cryptType=%d", i1, cryptType);*/
+
+			PakFile::File file;
+			file.cryptType = cryptType;
+			file.offset = offset;
+			file.decompressedSize = decompressedSize;
+			file.compressedSize= compressedSize;
+			file.name = name;
+			memmove(file.path, parent->path, sizeof(parent->path));
+			PathAppendW(file.path, file.name);
+			files.Push(file);
 		}
 
 		// directories content
-		for(int di = 0; di < dirCount; di++) {
-			const PakFile::Directory& dir = dirs[di];
-			ReadDirectory(buff, dir.dirCount, dir.fileCount, dir.name);
+		for(int di = 0; di < parent->dirCount; di++) {
+			const PakFile::Directory& dir = dirs[dirs.Count() - parent->dirCount + di];
+			ReadDirectory(buff, &dir);
 		}
 
 		LOG("}");
@@ -134,9 +182,10 @@ void PathGetDirectory(const char* from, char* out)
 	PathRemoveFileSpecA(out);
 }
 
+// Warning: replaces file if it exists
 bool FileSaveBuff(const wchar_t* path, const void* data, const i32 dataSize)
 {
-	HANDLE hFile = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+	HANDLE hFile = CreateFileW(path, GENERIC_WRITE, 0, NULL, TRUNCATE_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 	if(hFile == INVALID_HANDLE_VALUE) {
 		LOG("ERROR(CreateFileW): %d", GetLastError());
 		return false;
@@ -278,7 +327,94 @@ bool UnpakFile(const char* outputDir, u8* fileData, i32 fileSize)
 	ConstBuffer buff(subHeaderData, header.subHeaderSize);
 
 	PakFile pak(header);
-	pak.ReadDirectory(buff, header.rootDirectoryCount, header.rootFileCount, L"root");
+	pak.ReadTree(buff);
+
+	// create directory tree
+	LOG("Creating directory tree...");
+	const i32 dirCount = pak.dirs.Count();
+	for(int i = 0; i < dirCount; i++) {
+		const PakFile::Directory& dir = pak.dirs[i];
+		wchar_t path[512];
+		mbstowcs(path, outputDir, ARRAY_COUNT(path));
+
+		PathAppendW(path, dir.path);
+		BOOL r = CreateDirectoryW(path, NULL);
+	}
+
+	// extract files
+	LOG("Extracting files...");
+	CryptoXOR individual1;
+	individual1.Init(g_IndividualXorKey, sizeof(g_IndividualXorKey));
+
+	CryptoAES individual2;
+	const u8 key1[16] = {
+		0xa0, 0x1d, 0x3d, 0x99, 0x3b, 0x82, 0x0f, 0x1e, 0x13, 0x0a, 0x89, 0x55, 0x8d, 0xc0, 0xde, 0x22,
+	};
+
+	const u8 key2[16] = {
+		0x49, 0x59, 0x63, 0x55, 0xfd, 0x61, 0x71, 0x01, 0x00, 0xf3, 0xb9, 0xde, 0xb6, 0x6f, 0xb2, 0xa5,
+	};
+
+	individual2.Init(key1, key2);
+
+	BrotliDecoderState* dec = BrotliDecoderCreateInstance(0, 0, 0);
+	defer(BrotliDecoderDestroyInstance(dec););
+
+	const i32 fileCount = pak.files.Count();
+	for(int i = 0; i < fileCount; i++) {
+		const PakFile::File& file = pak.files[i];
+
+		fileBuff = ConstBuffer(fileData, fileSize);
+		fileBuff.ReadRaw(file.offset);
+		u8* fileEntryData = fileBuff.ReadRaw(file.compressedSize);
+
+		if(file.cryptType == 1) {
+			individual1.Decrypt(fileEntryData, file.compressedSize, 0);
+		}
+		else if(file.cryptType == 2) {
+			individual2.Decrypt(fileEntryData, file.compressedSize, 0);
+		}
+		else {
+			ASSERT_MSG(0, "invalid crypt type");
+		}
+
+		ASSERT(file.decompressedSize < ((u32)2 * (1024*1024*1024))); // < 2GB
+
+		LOG("'%ls'...", file.name);
+		if(file.decompressedSize != file.compressedSize) {
+			u8* dest = (u8*)malloc(file.decompressedSize);
+			size_t decodedSize = file.decompressedSize;
+			BrotliDecoderResult bdr = BrotliDecoderDecompress(file.compressedSize, fileEntryData, &decodedSize, dest);
+
+			if(bdr == BrotliDecoderResult::BROTLI_DECODER_RESULT_SUCCESS) {
+				wchar_t path[512];
+				mbstowcs(path, outputDir, ARRAY_COUNT(path));
+				PathAppendW(path, file.path);
+
+				bool r = FileSaveBuff(path, dest, decodedSize);
+				if(!r) {
+					LOG("ERROR(FileSaveBuff): failed to save file '%ls'", path);
+					continue;
+				}
+			}
+			else {
+				LOG("ERROR(BrotliDecoderDecompress): could not decode input");
+				continue;
+			}
+		}
+		else {
+			wchar_t path[512];
+			mbstowcs(path, outputDir, ARRAY_COUNT(path));
+			PathAppendW(path, file.path);
+
+			bool r = FileSaveBuff(path, fileEntryData, file.compressedSize);
+			if(!r) {
+				LOG("ERROR(FileSaveBuff): failed to save file '%ls'", path);
+				continue;
+			}
+		}
+	}
+
 	return true;
 }
 
