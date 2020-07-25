@@ -59,7 +59,7 @@ struct PakFile
 		u16 dirCount;
 		u16 fileCount;
 		const wchar_t* name;
-		wchar_t path[256];
+		wchar_t path[512];
 	};
 
 	struct File
@@ -69,7 +69,7 @@ struct PakFile
 		i32 decompressedSize;
 		i32 compressedSize;
 		const wchar_t* name;
-		wchar_t path[256];
+		wchar_t path[512];
 	};
 
 	Array<Directory,64> dirs;
@@ -79,7 +79,7 @@ struct PakFile
 		:header(header_)
 	{
 		dirs.Reserve(header.totalDirectoryCount + 1); // + root
-		dirs.Reserve(header.totalFileCount);
+		files.Reserve(header.totalFileCount);
 	}
 
 	void ReadTree(ConstBuffer& buff)
@@ -91,6 +91,9 @@ struct PakFile
 		dir.name = L"root";
 		memset(dir.path, 0, sizeof(dir.path)); // ""
 		ReadDirectory(buff, &dir);
+
+		ASSERT(dirs.Count() == header.totalDirectoryCount + 1);
+		ASSERT(files.Count() == header.totalFileCount);
 	}
 
 	void ReadDirectory(ConstBuffer& buff, const Directory* parent)
@@ -134,6 +137,7 @@ struct PakFile
 			i32 compressedSize = entry.Read<i32>();
 			u16 i1 = entry.Read<u16>();
 			u16 cryptType = entry.Read<u16>();
+			ASSERT(cryptType == 1 || cryptType == 2);
 			const wchar_t* name = (wchar_t*)entry.ReadRaw(entrySize - 26);
 
 			LOG("[FILE] offset=%d size(%d > %d) name='%ls' cryptType=%d", offset, compressedSize, decompressedSize, name, cryptType);
@@ -156,8 +160,9 @@ struct PakFile
 		}
 
 		// directories content
+		const i32 dirCount = dirs.Count();
 		for(int di = 0; di < parent->dirCount; di++) {
-			const PakFile::Directory& dir = dirs[dirs.Count() - parent->dirCount + di];
+			const PakFile::Directory& dir = dirs[dirCount - parent->dirCount + di];
 			ReadDirectory(buff, &dir);
 		}
 
@@ -309,6 +314,11 @@ bool UnpakFile(const char* outputDir, u8* fileData, i32 fileSize)
 
 	LOG("magic='%.4s' version=%d.%d", (char*)&header.magic, header.majorVersion, header.minorVersion);
 
+	if(!(header.magic == 0x574b4150 && header.majorVersion == 1 && header.minorVersion)) {
+		LOG("ERROR(UnpakFile): file format not supported (magic='%.4s' version=%d.%d)", (char*)&header.magic, header.majorVersion, header.minorVersion);
+		return false;
+	}
+
 	ctx.Decrypt(&header._unk1, 28, 0);
 
 	LOG("header = {");
@@ -322,7 +332,9 @@ bool UnpakFile(const char* outputDir, u8* fileData, i32 fileSize)
 	u8* subHeaderData = fileBuff.ReadRaw(header.subHeaderSize);
 	ctx.Decrypt(subHeaderData, header.subHeaderSize, 28);
 
+#ifdef CONF_DEBUG
 	fileSaveBuff("header.raw", subHeaderData, header.subHeaderSize);
+#endif
 
 	ConstBuffer buff(subHeaderData, header.subHeaderSize);
 
@@ -426,6 +438,8 @@ int main(int argc, char** argv)
 	if(argc == 3) {
 		const char* inputPath = argv[1];
 		const char* outputDir = argv[2];
+
+		LOG("'%s' > '%s'", inputPath, outputDir);
 
 		// open and read input file
 		i32 fileSize;
