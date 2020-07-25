@@ -2,6 +2,7 @@ import os
 import shutil
 import glob
 import sys
+import subprocess
 
 if len(sys.argv) < 3:
     print('Usage: python extract_paks.py "Path\\To\\MXM" "Path\\To\\Extraction"')
@@ -31,5 +32,6 @@ for f in pak_files:
     #print(fdir)
     os.makedirs(os.path.join(output_dir, fdir), exist_ok=True)
 
-    #print("%s %s %s" % (tool_path, f, os.path.join(output_dir, fdir, filename[:-4])))
-    os.system("%s %s %s" % (tool_path, f, os.path.join(output_dir, fdir, filename[:-4])))
+    print('"%s" "%s" "%s"' % (tool_path, f, os.path.join(output_dir, fdir, filename[:-4])))
+    #os.system('"%s" "%s" "%s"' % (tool_path, f, os.path.join(output_dir, fdir, filename[:-4])))
+    subprocess.run([tool_path, f, os.path.join(output_dir, fdir, filename[:-4])])
